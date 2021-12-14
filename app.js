@@ -1,3 +1,16 @@
+var reGroups = [/业主/];
+var reSeparator = /[ _.— －ㄧ– ― −-]/i;
+var reBuildingSuffix = new RegExp("\\s*[🏡=DF栋拣棟幢吨阁閣座～，。~、＃#+*＊" + reSeparator.source.substr(1, reSeparator.source.length - 2) + "]+\\s*", "i");
+var reFloorSuffix = new RegExp('\\s*[楼' + reSeparator.source.substr(1, reSeparator.source.length - 2) + ']+\\s*', "i");
+// console.error(reBuildingSuffix.source);
+// console.error(reFloorSuffix.source);
+var resProperty = [
+  new RegExp("([1-9]|10|[0-9][1-9])" + reBuildingSuffix.source + "(\\d\\d?)\\s*(\\d\\d)", "i"),
+  new RegExp("([1-9]|10|[0-9][1-9])" + reBuildingSuffix.source + "(\\d\\d?)" + reFloorSuffix.source + "(\\d\\d?)", "i"),
+  /(0?[1-9])\s*(0[1-9]|[12]\d|3[12])\s*(0[1-4])/,
+  /(1[01])\s*(0[1-9]|1\d|20)\s*(0[1-9]|1\d|2[0-7])/,
+];
+
 ﻿const app = { data: { '好': '大家好才是真的好' } }
     , WebSocketClient = require('./websocket')
     , client = new WebSocketClient()
@@ -24,61 +37,80 @@ function SaveConfig() {
 }
 init()
 
-var reSeparator = /[ _.— －ㄧ– ― −-]/i;
-var reBuildingSuffix = new RegExp("\\s*[🏡=DF栋拣棟幢吨阁閣座～，。~、＃#+*＊" + reSeparator.source.substr(1, reSeparator.length - 2) + "]\\s*", "i");
-var reProperty = new RegExp("(1[01]|0?[1-9])" + reBuildingSuffix.source + "(\\d\\d?)\\s*(\\d\\d)", "i");
-console.error(reProperty.source);
 function parseProperty(txt) {
-	let m = reProperty.exec(txt);
+	let m = firstMatch(resProperty, txt);
 	if (m) {
-		return [m[1], m[2], m[3]];
+		return [m[1] * 1, m[2] * 1, m[3] * 1];
 	}
 }
-async function listByBuilding(obj, dedup) {
-	let msg = obj.data.msg;
-	let members = (await Send({ method: 'getGroupUser', wxid: obj.data.fromid })).data;
-  let byBuilding = {};
-  if (dedup) {
-    dedup = {};
+function firstMatch(regexps, text) {
+  for (let regexp of regexps) {
+    var result = regexp.exec(text);
+    if (result) return result;
   }
-	for (let member of members) {
-		let property = parseProperty(member.nickName2);
-		if (!property) {
-			continue;
-		}
-    if (dedup) {
-      if (dedup[property]) {
-        continue;
-      }
-      dedup[property] = true;
+}
+//console.error(firstMatch(resProperty, "9＃-1403"));
+
+function *items(obj) {
+  for (let key in obj) {
+    yield Object.freeze([key, obj[key]]);
+  }
+}
+async function listByBuilding(obj) {
+	let msg = obj.data.msg;
+  let fromWxid = obj.data.fromid;
+  let countPropertyByBuilding = {};
+  var replies = [];
+  let wxids = { "length": 0 };
+  let properties = { "length": 0 };
+	for (let group of (await Send({ method: 'getGroup' })).data) {
+    if (group.wxid != fromWxid && !firstMatch(reGroups, group.name)) {
+      continue;
     }
 
-    let building = property[0];
-    if (!byBuilding[building]) {
-      byBuilding[building] = [];
-    }
-    byBuilding[building].push(member);
-	}
+  	let members = (await Send({ method: 'getGroupUser', wxid: group.wxid })).data;
+    replies.push(`${group.name} ${members.length} 人`);
+    var property;
+  	for (let member of members) {
+      if (!member.nickName2) continue;
+  		if (!(property = parseProperty(member.nickName2))) {
+        console.error(`${group.name} ${member.nickName2}`);
+  			continue;
+  		}
+      if (wxids[member.wxid]) continue;
+      wxids[member.wxid] = true;
+      wxids.length++;
+      if (properties[property]) continue;
+      properties[property] = true;
+      properties.length++;
+
+      let building = property[0];
+      if (!countPropertyByBuilding[building]) {
+        countPropertyByBuilding[building] = 0;
+      }
+      countPropertyByBuilding[building]++;
+  	}
+  }
+  replies.sort();
+  replies.push(`合计 ${wxids.length} 人`);
   let list = Array.from((function*() {
-    for (let building in byBuilding) {
-        yield `${building}栋:${byBuilding[building].length}`;
+    for (let [building, count] of items(countPropertyByBuilding)) {
+        yield `${building}栋${count}户`;
     }
   })());
-  let reply = list.join(" ");
-  await Send({ method: 'sendText', wxid: obj.data.fromid, msg: reply });
+  replies.push(list.join(" "));
+  replies.push(`合计 ${properties.length} 户`);
+  let reply = replies.join("\n");
+  await Send({ method: 'sendText', wxid: fromWxid, msg: reply });
 }
 async function TextMessage(obj) {
-    let msg = obj.data.msg, r
-    if (msg == '帮助') {
-        r = await Send({ method: 'sendText', wxid: obj.data.fromid, msg: "支持命令：户数，人数" })
-    }
-    else if (msg == "户数") {
-	await listByBuilding(obj, true);
-    }
-    else if (msg == "人数") {
-	await listByBuilding(obj, false);
-    }
-    console.log('文本处理结果', r)
+  let msg = obj.data.msg, r
+  if (msg == '帮助') {
+    await Send({ method: 'sendText', wxid: obj.data.fromid, msg: "支持命令：统计" })
+  }
+  else if (msg == "统计") {
+    await listByBuilding(obj);
+  }
 }
 async function onRequest(obj) {
     //收到请求
